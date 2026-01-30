@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Neon Smash: Pandora Edition</title>
+    <title>Neon Smash: Pandora Ultimate</title>
     <style>
         body {
             margin: 0;
@@ -11,11 +11,11 @@
             background-color: #050505;
             color: #fff;
             font-family: 'Courier New', Courier, monospace;
-            touch-action: none; /* 모바일 스크롤 방지 */
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
         }
-        canvas {
-            display: block;
-        }
+        canvas { display: block; }
         #ui {
             position: absolute;
             top: 50%;
@@ -24,23 +24,40 @@
             text-align: center;
             pointer-events: none;
             z-index: 10;
+            transition: opacity 0.3s;
         }
         h1 {
-            font-size: 40px;
-            text-shadow: 0 0 10px #ff00de, 0 0 20px #ff00de;
-            margin-bottom: 10px;
+            font-size: 50px;
+            text-shadow: 0 0 10px #ff00de, 0 0 30px #ff00de, 0 0 50px #ff00de;
+            margin: 0 0 20px 0;
+            letter-spacing: 5px;
         }
         p {
-            font-size: 18px;
+            font-size: 20px;
             color: #00ffea;
+            animation: blink 1s infinite;
+        }
+        @keyframes blink {
+            50% { opacity: 0.5; }
         }
         #scoreBoard {
             position: absolute;
-            top: 10px;
+            top: 20px;
             left: 20px;
-            font-size: 20px;
+            font-size: 24px;
             font-weight: bold;
             color: #fff;
+            text-shadow: 0 0 5px #00ffea;
+            z-index: 5;
+        }
+        #levelBoard {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            font-size: 24px;
+            font-weight: bold;
+            color: #ff0055;
+            text-shadow: 0 0 5px #ff0055;
             z-index: 5;
         }
     </style>
@@ -48,332 +65,428 @@
 <body>
 
     <div id="scoreBoard">SCORE: 0</div>
+    <div id="levelBoard">LV: 1</div>
     <div id="ui">
         <h1 id="title">NEON SMASH</h1>
-        <p id="sub">Tap to Start</p>
+        <p id="sub">Tap / Click to Start</p>
     </div>
     <canvas id="gameCanvas"></canvas>
 
 <script>
+    // --- 오디오 시스템 (Web Audio API) ---
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    let audioCtx = new AudioContext();
+
+    function playSound(type) {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        const now = audioCtx.currentTime;
+        
+        if (type === 'hit') { // 공 튕김
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(400, now);
+            osc.frequency.exponentialRampToValueAtTime(800, now + 0.1);
+            gain.gain.setValueAtTime(0.3, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+            osc.start(now);
+            osc.stop(now + 0.1);
+        } else if (type === 'break') { // 벽돌 파괴
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(200, now);
+            osc.frequency.exponentialRampToValueAtTime(50, now + 0.2);
+            gain.gain.setValueAtTime(0.3, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+            osc.start(now);
+            osc.stop(now + 0.2);
+        } else if (type === 'powerup') { // 아이템 획득
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(600, now);
+            osc.frequency.linearRampToValueAtTime(1200, now + 0.1);
+            osc.frequency.linearRampToValueAtTime(1800, now + 0.2);
+            gain.gain.setValueAtTime(0.3, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+            osc.start(now);
+            osc.stop(now + 0.3);
+        } else if (type === 'laser') { // 레이저 발사
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(800, now);
+            osc.frequency.exponentialRampToValueAtTime(200, now + 0.15);
+            gain.gain.setValueAtTime(0.1, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+            osc.start(now);
+            osc.stop(now + 0.15);
+        }
+    }
+
+    // --- 게임 설정 ---
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     const ui = document.getElementById('ui');
     const title = document.getElementById('title');
     const sub = document.getElementById('sub');
     const scoreEl = document.getElementById('scoreBoard');
+    const levelEl = document.getElementById('levelBoard');
 
-    // 게임 상태
-    let gameState = 'MENU'; // MENU, PLAYING, GAMEOVER
+    let gameState = 'MENU'; 
     let score = 0;
+    let level = 1;
+    let shakeDuration = 0;
+    
+    // 객체 배열
     let particles = [];
     let powerups = [];
-    let shakeDuration = 0;
+    let bullets = [];
+    let balls = [];
+    let bricks = [];
 
-    // 모바일 대응 리사이즈
+    // 패들
+    const paddle = {
+        w: 120, h: 15, x: 0, y: 0,
+        color: '#00ffea',
+        type: 'NORMAL', // NORMAL, LASER
+        timer: 0
+    };
+
     function resize() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
+        paddle.y = canvas.height - 60;
     }
     window.addEventListener('resize', resize);
     resize();
+    paddle.x = canvas.width/2 - paddle.w/2;
 
-    // 패들 설정
-    const paddle = {
-        w: 100,
-        h: 15,
-        x: canvas.width / 2 - 50,
-        y: canvas.height - 50,
-        color: '#00ffea',
-        speed: 8
-    };
-
-    // 공 설정 (배열로 관리 - 멀티볼)
-    let balls = [];
-    const BALL_SPEED = 6;
-
-    function createBall(x, y, vx, vy) {
-        balls.push({
-            x: x || canvas.width / 2,
-            y: y || canvas.height / 2,
-            r: 6,
-            dx: vx || (Math.random() > 0.5 ? BALL_SPEED : -BALL_SPEED),
-            dy: vy || -BALL_SPEED,
-            color: '#fff'
-        });
-    }
-
-    // 벽돌 설정
-    const brickConfig = {
-        rows: 6,
-        cols: 6,
-        padding: 10,
-        height: 25,
-        colors: ['#ff0055', '#ff00de', '#aa00ff', '#5500ff', '#0055ff']
-    };
-    let bricks = [];
-
-    function initBricks() {
-        bricks = [];
-        const brickWidth = (canvas.width - (brickConfig.padding * (brickConfig.cols + 1))) / brickConfig.cols;
+    // --- 초기화 ---
+    function initLevel(lvl) {
+        balls = [];
+        createBall(canvas.width/2, paddle.y - 20, 0, -8);
         
-        for(let r=0; r<brickConfig.rows; r++) {
-            for(let c=0; c<brickConfig.cols; c++) {
-                bricks.push({
-                    x: c * (brickWidth + brickConfig.padding) + brickConfig.padding,
-                    y: r * (brickConfig.height + brickConfig.padding) + 60,
-                    w: brickWidth,
-                    h: brickConfig.height,
-                    status: 1,
-                    color: brickConfig.colors[r % brickConfig.colors.length]
-                });
+        bricks = [];
+        const rows = 5 + lvl; // 레벨마다 줄 증가
+        const cols = Math.floor(canvas.width / 60);
+        const padding = 8;
+        const w = (canvas.width - padding * (cols + 1)) / cols;
+        const colors = ['#ff0055', '#ff4400', '#ffcc00', '#00ff44', '#00ccff', '#aa00ff'];
+
+        for(let r=0; r<rows; r++) {
+            for(let c=0; c<cols; c++) {
+                // 확률적으로 빈 공간 생성 (모양 만들기)
+                if(Math.random() > 0.1) { 
+                    bricks.push({
+                        x: c * (w + padding) + padding,
+                        y: r * (30 + padding) + 80,
+                        w: w, h: 30,
+                        status: 1,
+                        color: colors[r % colors.length],
+                        type: Math.random() < 0.1 ? 'HARD' : 'NORMAL' // 10% 확률로 단단한 벽돌
+                    });
+                }
             }
         }
     }
 
-    // 입력 처리 (마우스 & 터치)
-    let inputX = canvas.width / 2;
-    
-    function handleInput(x) {
-        inputX = x;
-        paddle.x = inputX - paddle.w / 2;
-        
-        // 화면 밖 제한
+    function createBall(x, y, dx, dy) {
+        balls.push({
+            x: x, y: y, r: 6,
+            dx: dx || (Math.random()*6 - 3),
+            dy: dy || -7,
+            color: '#fff',
+            trail: [] // 잔상 효과
+        });
+    }
+
+    function resetGame() {
+        score = 0;
+        level = 1;
+        scoreEl.innerText = `SCORE: ${score}`;
+        levelEl.innerText = `LV: ${level}`;
+        gameState = 'PLAYING';
+        ui.style.opacity = 0;
+        paddle.type = 'NORMAL';
+        powerups = [];
+        bullets = [];
+        particles = [];
+        initLevel(level);
+    }
+
+    // --- 입력 처리 ---
+    function handleInput(clientX) {
+        paddle.x = clientX - paddle.w / 2;
         if(paddle.x < 0) paddle.x = 0;
         if(paddle.x + paddle.w > canvas.width) paddle.x = canvas.width - paddle.w;
     }
-
     canvas.addEventListener('mousemove', e => handleInput(e.clientX));
     canvas.addEventListener('touchmove', e => {
-        e.preventDefault(); // 스크롤 방지
+        e.preventDefault();
         handleInput(e.touches[0].clientX);
     }, {passive: false});
 
-    canvas.addEventListener('click', () => {
-        if(gameState === 'MENU' || gameState === 'GAMEOVER') {
+    // 시작 및 발사
+    const actionHandler = () => {
+        if (gameState === 'MENU' || gameState === 'GAMEOVER') {
+            if(audioCtx.state === 'suspended') audioCtx.resume();
             resetGame();
+        } else if (gameState === 'PLAYING' && paddle.type === 'LASER') {
+            // 레이저 발사
+            playSound('laser');
+            bullets.push({x: paddle.x, y: paddle.y, w: 4, h: 15, dy: -15, color: '#ff0055'});
+            bullets.push({x: paddle.x + paddle.w, y: paddle.y, w: 4, h: 15, dy: -15, color: '#ff0055'});
         }
-    });
+    };
+    canvas.addEventListener('click', actionHandler);
+    canvas.addEventListener('touchstart', actionHandler, {passive: false});
 
-    canvas.addEventListener('touchstart', () => {
-        if(gameState === 'MENU' || gameState === 'GAMEOVER') {
-            resetGame();
-        }
-    }, {passive: false});
-
-
-    function resetGame() {
-        gameState = 'PLAYING';
-        score = 0;
-        balls = [];
-        powerups = [];
-        particles = [];
-        scoreEl.innerText = 'SCORE: 0';
-        createBall(canvas.width/2, canvas.height - 60);
-        initBricks();
-        ui.style.display = 'none';
-        
-        // 패들 크기 반응형 조정
-        paddle.w = canvas.width * 0.25; 
-        if(paddle.w > 150) paddle.w = 150;
-        paddle.y = canvas.height - 50;
-    }
-
-    // 파티클 효과 (꽃잎)
+    // --- 이펙트 ---
     function createParticles(x, y, color) {
-        for(let i=0; i<12; i++) { // 꽃잎 개수 증가
+        for(let i=0; i<15; i++) {
             particles.push({
-                x: x,
-                y: y,
-                dx: (Math.random() - 0.5) * 8, // 더 넓게 퍼짐
-                dy: (Math.random() - 0.5) * 8,
-                life: 40,
+                x: x, y: y,
+                dx: (Math.random() - 0.5) * 10,
+                dy: (Math.random() - 0.5) * 10,
+                size: Math.random() * 5 + 2,
                 color: color,
-                angle: Math.random() * Math.PI * 2, // 회전 각도
-                spin: (Math.random() - 0.5) * 0.2, // 회전 속도
-                size: Math.random() * 4 + 3 // 크기 다양화
+                life: 40,
+                angle: Math.random() * Math.PI * 2,
+                spin: (Math.random() - 0.5) * 0.3
             });
         }
     }
 
-    // 아이템 (멀티볼)
-    function createPowerup(x, y) {
-        if(Math.random() < 0.2) { // 20% 확률
-            powerups.push({
-                x: x,
-                y: y,
-                w: 15,
-                h: 15,
-                dy: 3,
-                type: 'MULTIBALL'
-            });
+    function createTextEffect(text, x, y) {
+        // 텍스트 이펙트 (구현 생략 - 파티클로 대체)
+    }
+
+    function spawnPowerup(x, y) {
+        const rand = Math.random();
+        let type = '';
+        let color = '';
+        let symbol = '';
+
+        if(rand < 0.1) { type = 'MULTI'; color = '#ffff00'; symbol = '★'; } // 10% 멀티볼
+        else if(rand < 0.15) { type = 'LASER'; color = '#ff0055'; symbol = '⚡'; } // 5% 레이저
+        else if(rand < 0.2) { type = 'WIDE'; color = '#00ffea'; symbol = '↔'; } // 5% 와이드
+
+        if(type) {
+            powerups.push({ x: x, y: y, dy: 4, type: type, color: color, symbol: symbol });
         }
     }
 
-    // 화면 흔들림
-    function shakeScreen() {
-        shakeDuration = 10;
-    }
-
-    // 메인 루프
+    // --- 메인 루프 ---
     function update() {
         if(gameState !== 'PLAYING') return;
 
-        // 공 이동
-        balls.forEach((ball, bIndex) => {
-            ball.x += ball.dx;
-            ball.y += ball.dy;
+        // 레이저 타이머
+        if(paddle.type !== 'NORMAL') {
+            paddle.timer--;
+            if(paddle.timer <= 0) paddle.type = 'NORMAL';
+        }
+
+        // 공 업데이트
+        balls.forEach((b, idx) => {
+            // 잔상 저장
+            b.trail.push({x: b.x, y: b.y});
+            if(b.trail.length > 5) b.trail.shift();
+
+            b.x += b.dx;
+            b.y += b.dy;
 
             // 벽 충돌
-            if(ball.x + ball.r > canvas.width || ball.x - ball.r < 0) {
-                ball.dx = -ball.dx;
-            }
-            if(ball.y - ball.r < 0) {
-                ball.dy = -ball.dy;
-            }
+            if(b.x + b.r > canvas.width || b.x - b.r < 0) { b.dx = -b.dx; playSound('hit'); }
+            if(b.y - b.r < 0) { b.dy = -b.dy; playSound('hit'); }
             
-            // 바닥 충돌 (죽음)
-            if(ball.y - ball.r > canvas.height) {
-                balls.splice(bIndex, 1);
+            // 패들 충돌
+            if(b.dy > 0 && b.x >= paddle.x && b.x <= paddle.x + paddle.w &&
+               b.y + b.r >= paddle.y && b.y - b.r <= paddle.y + paddle.h/2) {
+                b.dy = -Math.abs(b.dy) * 1.05; // 속도 증가
+                let hitPoint = (b.x - (paddle.x + paddle.w/2)) / (paddle.w/2);
+                b.dx = hitPoint * 8; // 각도 조절
+                playSound('hit');
+                // 패들 이펙트
+                for(let i=0; i<5; i++) particles.push({x: b.x, y: paddle.y, dx:(Math.random()-0.5)*5, dy:-Math.random()*5, life:20, color:'#fff', size:2});
             }
 
-            // 패들 충돌
-            if(ball.x > paddle.x && ball.x < paddle.x + paddle.w &&
-               ball.y + ball.r > paddle.y && ball.y - ball.r < paddle.y + paddle.h) {
-                ball.dy = -Math.abs(ball.dy); // 무조건 위로
-                // 패들 어디 맞았는지에 따라 각도 변경 (재미 요소)
-                let hitPoint = ball.x - (paddle.x + paddle.w/2);
-                ball.dx = hitPoint * 0.15; 
-                
-                // 공 속도 약간 증가
-                ball.dx *= 1.05;
-                ball.dy *= 1.05;
-            }
+            // 바닥
+            if(b.y - b.r > canvas.height) balls.splice(idx, 1);
 
             // 벽돌 충돌
-            for(let i=0; i<bricks.length; i++) {
-                let b = bricks[i];
-                if(b.status === 1) {
-                    if(ball.x > b.x && ball.x < b.x + b.w &&
-                       ball.y > b.y && ball.y < b.y + b.h) {
-                        ball.dy = -ball.dy;
-                        b.status = 0;
-                        score += 10;
-                        scoreEl.innerText = 'SCORE: ' + score;
-                        createParticles(b.x + b.w/2, b.y + b.h/2, b.color);
-                        createPowerup(b.x + b.w/2, b.y + b.h/2);
-                        shakeScreen();
+            bricks.forEach(brick => {
+                if(brick.status === 1) {
+                    if(b.x > brick.x && b.x < brick.x + brick.w &&
+                       b.y > brick.y && b.y < brick.y + brick.h) {
+                        b.dy = -b.dy;
+                        if(brick.type === 'NORMAL') {
+                            brick.status = 0;
+                            score += 10;
+                            createParticles(brick.x + brick.w/2, brick.y + brick.h/2, brick.color);
+                            spawnPowerup(brick.x + brick.w/2, brick.y + brick.h/2);
+                            playSound('break');
+                            shakeDuration = 5;
+                        } else { // HARD
+                            brick.type = 'NORMAL'; // 한번 맞으면 일반 벽돌로
+                            brick.color = '#fff'; // 색상 변경
+                            playSound('hit');
+                            shakeDuration = 2;
+                        }
+                        scoreEl.innerText = `SCORE: ${score}`;
                     }
                 }
+            });
+        });
+
+        // 총알 업데이트
+        bullets.forEach((b, idx) => {
+            b.y += b.dy;
+            bricks.forEach(brick => {
+                if(brick.status === 1 && b.x > brick.x && b.x < brick.x + brick.w && b.y > brick.y && b.y < brick.y + brick.h) {
+                    brick.status = 0;
+                    b.del = true;
+                    score += 10;
+                    createParticles(brick.x + brick.w/2, brick.y + brick.h/2, brick.color);
+                    playSound('break');
+                    spawnPowerup(brick.x + brick.w/2, brick.y + brick.h/2);
+                }
+            });
+            if(b.y < 0) b.del = true;
+        });
+        bullets = bullets.filter(b => !b.del);
+
+        // 아이템 업데이트
+        powerups.forEach((p, idx) => {
+            p.y += p.dy;
+            if(p.y + 20 > paddle.y && p.y < paddle.y + paddle.h &&
+               p.x > paddle.x && p.x < paddle.x + paddle.w) {
+                // 획득
+                playSound('powerup');
+                if(p.type === 'MULTI') {
+                    let len = balls.length;
+                    for(let i=0; i<len; i++) createBall(balls[i].x, balls[i].y, -balls[i].dx, -balls[i].dy);
+                } else if(p.type === 'LASER') {
+                    paddle.type = 'LASER';
+                    paddle.timer = 600; // 10초
+                    paddle.color = '#ff0055';
+                } else if(p.type === 'WIDE') {
+                    paddle.w = Math.min(paddle.w + 50, 300);
+                }
+                powerups.splice(idx, 1);
+                score += 50;
+            } else if(p.y > canvas.height) {
+                powerups.splice(idx, 1);
             }
         });
 
-        // 게임 오버 체크
+        // 레벨 클리어
+        if(bricks.every(b => b.status === 0)) {
+            level++;
+            levelEl.innerText = `LV: ${level}`;
+            initLevel(level);
+            playSound('powerup');
+        }
+
+        // 게임 오버
         if(balls.length === 0) {
             gameState = 'GAMEOVER';
-            ui.style.display = 'block';
+            ui.style.opacity = 1;
             title.innerText = "GAME OVER";
-            sub.innerText = "Score: " + score + "\nTap to Retry";
-            title.style.color = 'red';
-            title.style.textShadow = '0 0 20px red';
+            title.style.color = "#ff0000";
+            sub.innerText = `Score: ${score}\nTap to Retry`;
         }
-
-        // 클리어 체크
-        if(bricks.every(b => b.status === 0)) {
-            gameState = 'GAMEOVER'; // 일단은 끝
-            ui.style.display = 'block';
-            title.innerText = "YOU WIN!";
-            title.style.color = '#00ffea';
-            sub.innerText = "Score: " + score;
-        }
-
-        // 아이템 이동
-        powerups.forEach((p, index) => {
-            p.y += p.dy;
-            // 패들 충돌
-            if(p.x > paddle.x && p.x < paddle.x + paddle.w &&
-               p.y > paddle.y && p.y < paddle.y + paddle.h) {
-                // 멀티볼 효과!
-                let curLen = balls.length;
-                for(let i=0; i<curLen; i++) {
-                    createBall(balls[i].x, balls[i].y, -balls[i].dx, -balls[i].dy);
-                }
-                powerups.splice(index, 1);
-                score += 50;
-            }
-            if(p.y > canvas.height) powerups.splice(index, 1);
-        });
-
-        // 파티클 업데이트
-        particles.forEach((p, index) => {
-            p.x += p.dx;
-            p.y += p.dy;
-            p.angle += p.spin; // 회전 적용
-            p.life--;
-            p.dx *= 0.95; // 공기 저항 (부드럽게 멈춤)
-            p.dy *= 0.95;
-            if(p.life <= 0) particles.splice(index, 1);
-        });
     }
 
     function draw() {
-        // 배경 (잔상 효과)
-        ctx.fillStyle = 'rgba(5, 5, 5, 0.3)';
+        // 배경 (잔상)
+        ctx.fillStyle = 'rgba(5, 5, 5, 0.4)';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // 쉐이크 효과 적용
+        // 쉐이크
         ctx.save();
         if(shakeDuration > 0) {
-            let dx = (Math.random() - 0.5) * 10;
-            let dy = (Math.random() - 0.5) * 10;
-            ctx.translate(dx, dy);
+            ctx.translate((Math.random()-0.5)*10, (Math.random()-0.5)*10);
             shakeDuration--;
         }
 
-        // 패들 그리기
-        ctx.fillStyle = paddle.color;
+        // 패들
         ctx.shadowBlur = 20;
         ctx.shadowColor = paddle.color;
+        ctx.fillStyle = paddle.color;
         ctx.fillRect(paddle.x, paddle.y, paddle.w, paddle.h);
+        
+        // 레이저 모드일 때 장식
+        if(paddle.type === 'LASER') {
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(paddle.x, paddle.y-10, 5, 10);
+            ctx.fillRect(paddle.x+paddle.w-5, paddle.y-10, 5, 10);
+        }
         ctx.shadowBlur = 0;
 
-        // 벽돌 그리기
+        // 벽돌
         bricks.forEach(b => {
             if(b.status === 1) {
                 ctx.fillStyle = b.color;
-                ctx.fillRect(b.x, b.y, b.w - 2, b.h - 2);
+                ctx.fillRect(b.x, b.y, b.w-2, b.h-2);
+                if(b.type === 'HARD') { // 딱딱한 벽돌 표시
+                    ctx.strokeStyle = '#fff';
+                    ctx.strokeRect(b.x+2, b.y+2, b.w-6, b.h-6);
+                }
             }
         });
 
-        // 공 그리기
-        balls.forEach(ball => {
+        // 공 (꼬리 효과)
+        balls.forEach(b => {
+            // 꼬리
             ctx.beginPath();
-            ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2);
-            ctx.fillStyle = ball.color;
+            for(let i=0; i<b.trail.length; i++) {
+                ctx.lineTo(b.trail[i].x, b.trail[i].y);
+            }
+            ctx.strokeStyle = `rgba(255, 255, 255, 0.3)`;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(b.x, b.y, b.r, 0, Math.PI*2);
+            ctx.fillStyle = '#fff';
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = '#fff';
             ctx.fill();
+            ctx.shadowBlur = 0;
             ctx.closePath();
         });
 
-        // 아이템 그리기
-        powerups.forEach(p => {
-            ctx.fillStyle = '#ffff00';
-            ctx.font = "20px Arial";
-            ctx.fillText("★", p.x, p.y);
+        // 총알
+        ctx.fillStyle = '#ff0055';
+        bullets.forEach(b => {
+            ctx.fillRect(b.x, b.y, b.w, b.h);
         });
 
-        // 파티클 그리기 (꽃잎 모양)
-        particles.forEach(p => {
+        // 아이템
+        powerups.forEach(p => {
+            ctx.fillStyle = p.color;
+            ctx.font = "bold 24px Arial";
+            ctx.fillText(p.symbol, p.x-10, p.y+10);
+        });
+
+        // 파티클 (꽃잎)
+        particles.forEach((p, i) => {
+            p.x += p.dx;
+            p.y += p.dy;
+            p.dx *= 0.95; p.dy *= 0.95;
+            p.angle += p.spin;
+            p.life--;
+            
             ctx.save();
             ctx.translate(p.x, p.y);
             ctx.rotate(p.angle);
             ctx.fillStyle = p.color;
-            ctx.globalAlpha = p.life / 40; // 서서히 투명해짐
-            
-            // 타원형 꽃잎 그리기
+            ctx.globalAlpha = p.life / 40;
             ctx.beginPath();
-            ctx.ellipse(0, 0, p.size, p.size/2, 0, 0, Math.PI * 2);
+            ctx.ellipse(0, 0, p.size, p.size/2, 0, 0, Math.PI*2);
             ctx.fill();
-            
             ctx.restore();
+            ctx.globalAlpha = 1;
+
+            if(p.life <= 0) particles.splice(i, 1);
         });
 
         ctx.restore();
